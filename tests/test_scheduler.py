@@ -2,6 +2,7 @@ import pytest
 
 from app.models.process import Process
 from app.services.validation import (
+    get_algorithm_availability,
     validate_algorithm_inputs,
     validate_processes,
     validate_quantum,
@@ -136,6 +137,44 @@ def test_gantt_segments_are_non_overlapping_and_cover_all_time():
     assert result.schedule[-1].end == 5
     for i in range(1, len(result.schedule)):
         assert result.schedule[i - 1].end <= result.schedule[i].start
+
+
+def test_ts_and_te_are_coherent_for_all_processes():
+    processes = [
+        Process("P1", 0, 5),
+        Process("P2", 1, 3),
+    ]
+
+    result = FCFSAlgorithm().run(processes)
+
+    for process in processes:
+        metrics = result.process_metrics[process.process_id]
+        ts = metrics["completion_time"] - process.arrival_time
+        te = ts - process.burst_time
+        assert metrics["ts"] == ts
+        assert metrics["te"] == te
+        assert ts == metrics["te"] + process.burst_time
+
+
+def test_algorithm_availability_requires_valid_priority_and_quantum_data():
+    processes_without_priority = [
+        Process("P1", 0, 5),
+        Process("P2", 1, 3),
+    ]
+    incomplete_priority_processes = [
+        Process("P1", 0, 5, priority=1),
+        Process("P2", 1, 3),
+    ]
+
+    availability = get_algorithm_availability(processes_without_priority, quantum=0)
+    assert availability["FCFS"] is True
+    assert availability["SJF"] is True
+    assert availability["Priority"] is False
+    assert availability["Round Robin"] is False
+
+    availability = get_algorithm_availability(incomplete_priority_processes, quantum=2)
+    assert availability["Priority"] is False
+    assert availability["Round Robin"] is True
 
 
 def test_reference_scenario_has_valid_outputs():

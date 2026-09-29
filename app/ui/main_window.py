@@ -1,6 +1,13 @@
 from __future__ import annotations
 
+import sys
+from pathlib import Path
 from typing import Optional
+
+if __package__ in (None, ""):
+    project_root = Path(__file__).resolve().parents[2]
+    if str(project_root) not in sys.path:
+        sys.path.insert(0, str(project_root))
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
@@ -15,7 +22,10 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QPushButton,
+    QScrollArea,
+    QSizePolicy,
     QSpinBox,
+    QSplitter,
     QTableWidget,
     QTableWidgetItem,
     QTabWidget,
@@ -94,22 +104,23 @@ class ProcessTableWidget(QTableWidget):
 class GanttWidget(QWidget):
     def __init__(self, result: SimulationResult) -> None:
         super().__init__()
-        self.figure = Figure(figsize=(9, 3))
+        self.result = result
+        self.figure = Figure(figsize=(max(8, result.total_time * 1.2 + 2), 2.5 + max(2, len(result.processes)) * 0.8))
         self.canvas = FigureCanvas(self.figure)
+        self.canvas.setMinimumWidth(max(720, int(self.figure.get_figwidth() * 100)))
+        self.canvas.setMinimumHeight(max(220, int(self.figure.get_figheight() * 110)))
+        self.setMinimumHeight(max(260, int(self.figure.get_figheight() * 120)))
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(4, 4, 4, 4)
         layout.addWidget(self.canvas)
         self.render(result)
 
     def render(self, result: SimulationResult) -> None:
         self.figure.clear()
         axes = self.figure.add_subplot(111)
-        y_positions: dict[str, int] = {}
-        unique_processes = []
-        for segment in result.schedule:
-            process_id = segment.process_id
-            if process_id is not None and process_id not in y_positions:
-                y_positions[process_id] = len(unique_processes)
-                unique_processes.append(process_id)
+        unique_processes = [process.process_id for process in result.processes]
+        y_positions = {process_id: index for index, process_id in enumerate(unique_processes)}
 
         if not unique_processes:
             axes.set_title(result.algorithm_name)
@@ -119,24 +130,58 @@ class GanttWidget(QWidget):
             self.canvas.draw()
             return
 
-        axis_labels = []
-        for process_id in unique_processes:
-            axis_labels.append(process_id)
-
-        for index, segment in enumerate(result.schedule):
-            if segment.process_id is None:
-                axes.barh(0, segment.duration, left=segment.start, height=0.6, color="lightgray", edgecolor="black")
-                continue
-            y = y_positions[segment.process_id]
-            color = ["#4C78A8", "#F58518", "#54A24B", "#E45756", "#B279A2", "#FF9DA6", "#72B7B2", "#BAB0AC"][index % 8]
-            axes.barh(y, segment.duration, left=segment.start, height=0.6, color=color, edgecolor="black")
-
+        axes.set_xlim(0, max(1, result.total_time))
+        axes.set_ylim(-0.5, len(unique_processes) - 0.5)
         axes.set_yticks(range(len(unique_processes)))
         axes.set_yticklabels(unique_processes)
         axes.set_xlabel("Tiempo")
         axes.set_title(result.algorithm_name)
-        axes.set_xlim(0, max(1, result.total_time))
+
+        color_cycle = ["#4C78A8", "#F58518", "#54A24B", "#E45756", "#B279A2", "#FF9DA6", "#72B7B2", "#BAB0AC"]
+        for process in result.processes:
+            process_id = process.process_id
+            y = y_positions[process_id]
+            execution_segments = [segment for segment in result.schedule if segment.process_id == process_id]
+            if not execution_segments:
+                continue
+
+            start_time = process.arrival_time
+            end_time = max(segment.end for segment in execution_segments)
+            axes.add_patch(self._outer_border(start_time, end_time, y))
+
+            waiting_ranges: list[tuple[int, int]] = []
+            current_time = start_time
+            for segment in sorted(execution_segments, key=lambda item: item.start):
+                if segment.start > current_time:
+                    waiting_ranges.append((current_time, segment.start))
+                current_time = max(current_time, segment.end)
+            if end_time > current_time:
+                waiting_ranges.append((current_time, end_time))
+
+            for wait_start, wait_end in waiting_ranges:
+                width = max(0, wait_end - wait_start)
+                if width > 0:
+                    axes.barh(y, width, left=wait_start, height=0.35, color="none", edgecolor="black", linewidth=1.5, hatch="//")
+
+            for segment in execution_segments:
+                axes.barh(y, segment.duration, left=segment.start, height=0.6, color=color_cycle[y % len(color_cycle)], edgecolor="black", linewidth=1.1)
+
+        axes.grid(axis="x", linestyle="--", alpha=0.25)
         self.canvas.draw()
+
+    @staticmethod
+    def _outer_border(start: int, end: int, row: int):
+        from matplotlib.patches import Rectangle
+
+        return Rectangle(
+            (start, row - 0.55),
+            max(0, end - start),
+            1.1,
+            fill=False,
+            edgecolor="black",
+            linewidth=2.5,
+            linestyle="-",
+        )
 
 
 class MainWindow(QMainWindow):
@@ -153,24 +198,33 @@ class MainWindow(QMainWindow):
             "SRTF": QCheckBox("SRTF"),
             "Priority Preemptive": QCheckBox("Priority Preemptive"),
         }
-        self.algorithm_checks["FCFS"].setChecked(True)
-        self.algorithm_checks["SJF"].setChecked(True)
-        self.algorithm_checks["Priority"].setChecked(True)
-        self.algorithm_checks["Round Robin"].setChecked(True)
         self.quantum_input = QSpinBox()
-        self.quantum_input.setMinimum(1)
-        self.quantum_input.setMaximum(1000)
-        self.quantum_input.setValue(2)
+        self.quantum_input.setRange(0, 1000)
+        self.quantum_input.setValue(0)
         self.process_table = ProcessTableWidget()
         self.results_table = QTableWidget()
         self.results_text = QTextEdit()
         self.results_text.setReadOnly(True)
         self.gantt_container = QWidget()
+        self.gantt_container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         self.gantt_layout = QVBoxLayout(self.gantt_container)
+        self.gantt_layout.setContentsMargins(4, 4, 4, 4)
+        self.gantt_layout.setSpacing(8)
+        self.gantt_scroll = QScrollArea()
+        self.gantt_scroll.setWidgetResizable(True)
+        self.gantt_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.gantt_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.gantt_scroll.setWidget(self.gantt_container)
+        self.gantt_container.setMinimumHeight(350)
         self.tabs = QTabWidget()
 
         self._build_ui()
         self._load_processes()
+        self.process_table.itemChanged.connect(self._refresh_algorithm_availability)
+        self.quantum_input.valueChanged.connect(self._refresh_algorithm_availability)
+        self.algorithm_checks["FCFS"].setChecked(True)
+        self.algorithm_checks["SJF"].setChecked(True)
+        self._refresh_algorithm_availability()
 
     def _default_processes(self) -> list[Process]:
         return [Process("P1", 0, 5), Process("P2", 1, 3)]
@@ -178,6 +232,9 @@ class MainWindow(QMainWindow):
     def _build_ui(self) -> None:
         central = QWidget()
         root_layout = QVBoxLayout(central)
+
+        input_panel = QWidget()
+        input_layout = QVBoxLayout(input_panel)
 
         controls_layout = QHBoxLayout()
         add_button = QPushButton("Agregar proceso")
@@ -197,36 +254,42 @@ class MainWindow(QMainWindow):
         controls_layout.addWidget(remove_button)
         controls_layout.addWidget(clear_button)
         controls_layout.addWidget(execute_button)
-        root_layout.addLayout(controls_layout)
+        input_layout.addLayout(controls_layout)
 
         quantum_form = QFormLayout()
         quantum_form.addRow("Quantum", self.quantum_input)
-        root_layout.addLayout(quantum_form)
+        input_layout.addLayout(quantum_form)
 
         algorithm_layout = QHBoxLayout()
         for checkbox in self.algorithm_checks.values():
             algorithm_layout.addWidget(checkbox)
-        root_layout.addLayout(algorithm_layout)
+        input_layout.addLayout(algorithm_layout)
 
         select_all_button = QPushButton("Seleccionar todos")
         select_all_button.clicked.connect(self._select_all_algorithms)
-        root_layout.addWidget(select_all_button)
+        input_layout.addWidget(select_all_button)
 
-        root_layout.addWidget(self.process_table)
+        input_layout.addWidget(self.process_table)
 
-        self.results_table.setColumnCount(8)
-        self.results_table.setHorizontalHeaderLabels(["Proceso", "AT", "BT", "Prioridad", "CT", "TAT", "WT", "RT"])
+        self.results_table.setColumnCount(7)
+        self.results_table.setHorizontalHeaderLabels(["Algoritmo", "Proceso", "Llegada", "Ejecución", "Finalización", "TS", "TE"])
         self.results_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
 
         self.tabs.addTab(self.results_table, "Resultados")
         self.tabs.addTab(self.results_text, "Informe")
-        self.tabs.addTab(self.gantt_container, "Gantt")
+        self.tabs.addTab(self.gantt_scroll, "Gantt")
 
-        root_layout.addWidget(self.tabs)
+        split = QSplitter()
+        split.addWidget(input_panel)
+        split.addWidget(self.tabs)
+        split.setStretchFactor(0, 1)
+        split.setStretchFactor(1, 2)
+        root_layout.addWidget(split)
         self.setCentralWidget(central)
 
     def _load_processes(self) -> None:
         self.process_table.set_processes(self.processes)
+        self._refresh_algorithm_availability()
 
     def _add_process(self) -> None:
         next_id = self._next_process_id()
@@ -261,16 +324,61 @@ class MainWindow(QMainWindow):
 
     def _clear_processes(self) -> None:
         self.processes = []
+        self.quantum_input.setValue(0)
+        self._clear_results()
         self._load_processes()
+        self._refresh_algorithm_availability()
+
+    def _clear_results(self) -> None:
+        self.results_text.clear()
+        self.results_table.setRowCount(0)
+        self.results_table.setColumnCount(7)
+        self.results_table.setHorizontalHeaderLabels(["Algoritmo", "Proceso", "Llegada", "Ejecución", "Finalización", "TS", "TE"])
+        while self.gantt_layout.count():
+            child = self.gantt_layout.takeAt(0)
+            if child.widget() is not None:
+                child.widget().deleteLater()
 
     def _select_all_algorithms(self) -> None:
-        for checkbox in self.algorithm_checks.values():
-            checkbox.setChecked(True)
+        for name, checkbox in self.algorithm_checks.items():
+            if checkbox.isEnabled():
+                checkbox.setChecked(True)
+
+    def _refresh_algorithm_availability(self) -> None:
+        from app.services.validation import get_algorithm_availability
+
+        try:
+            current_processes = self.process_table.get_processes()
+        except ValueError:
+            current_processes = []
+
+        availability = get_algorithm_availability(current_processes, self.quantum_input.value())
+        if not current_processes:
+            for checkbox in self.algorithm_checks.values():
+                checkbox.setEnabled(False)
+                checkbox.setChecked(False)
+                checkbox.setToolTip("No hay procesos para ejecutar.")
+            return
+
+        messages = {
+            "Priority": "Priority no disponible: todos los procesos deben tener una prioridad definida.",
+            "Priority Preemptive": "Priority no disponible: todos los procesos deben tener una prioridad definida.",
+            "Round Robin": "Round Robin no disponible: el quantum debe ser mayor que 0.",
+        }
+        for name, checkbox in self.algorithm_checks.items():
+            available = availability.get(name, False)
+            checkbox.setEnabled(available)
+            checkbox.setToolTip(messages.get(name, "") if not available else "")
+            if not available:
+                checkbox.setChecked(False)
 
     def _execute(self) -> None:
         try:
             self.processes = self.process_table.get_processes()
             selected_algorithms = [name for name, checkbox in self.algorithm_checks.items() if checkbox.isChecked()]
+            if not selected_algorithms:
+                QMessageBox.warning(self, "Validación", "Debe seleccionar al menos un algoritmo disponible.")
+                return
             quantum = self.quantum_input.value()
             results = SimulationService.run(self.processes, selected_algorithms, quantum)
             self._render_results(results)
@@ -281,7 +389,6 @@ class MainWindow(QMainWindow):
         self.results_text.clear()
         self.results_text.setPlainText(ReportGenerator.generate_report(results))
 
-        self.gantt_layout.takeAt(0)
         while self.gantt_layout.count():
             child = self.gantt_layout.takeAt(0)
             if child.widget() is not None:
@@ -289,39 +396,32 @@ class MainWindow(QMainWindow):
 
         for result in results:
             widget = GanttWidget(result)
+            widget.setMinimumHeight(max(260, len(result.processes) * 70 + 80))
+            widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
             self.gantt_layout.addWidget(widget)
 
-        if not results:
-            self.results_table.setRowCount(0)
-            return
-
+        self.gantt_container.adjustSize()
+        self.gantt_scroll.updateGeometry()
         self.results_table.setRowCount(0)
+        self.results_table.setColumnCount(7)
+        self.results_table.setHorizontalHeaderLabels(["Algoritmo", "Proceso", "Llegada", "Ejecución", "Finalización", "TS", "TE"])
+
         for result in results:
-            rows = []
-            for process_id, metrics in result.process_metrics.items():
-                process = next((p for p in self.processes if p.process_id == process_id), None)
-                rows.append({
-                    "process": process_id,
-                    "arrival": process.arrival_time if process else 0,
-                    "burst": process.burst_time if process else 0,
-                    "priority": process.priority if process else "",
-                    "ct": metrics["completion_time"],
-                    "tat": metrics["turnaround_time"],
-                    "wt": metrics["waiting_time"],
-                    "rt": metrics["response_time"],
-                })
-            for row_data in rows:
+            for process in result.processes:
+                metrics = result.process_metrics.get(process.process_id, {})
+                completion_time = int(metrics.get("completion_time", process.arrival_time))
+                ts = int(metrics.get("ts", completion_time - process.arrival_time))
+                te = int(metrics.get("te", max(0, ts - process.burst_time)))
                 row_index = self.results_table.rowCount()
                 self.results_table.insertRow(row_index)
                 values = [
-                    row_data["process"],
-                    str(row_data["arrival"]),
-                    str(row_data["burst"]),
-                    str(row_data["priority"]),
-                    str(int(row_data["ct"])),
-                    str(int(row_data["tat"])),
-                    str(int(row_data["wt"])),
-                    str(int(row_data["rt"])),
+                    result.algorithm_name,
+                    process.process_id,
+                    str(process.arrival_time),
+                    str(process.burst_time),
+                    str(completion_time),
+                    str(ts),
+                    str(te),
                 ]
                 for column_index, value in enumerate(values):
                     self.results_table.setItem(row_index, column_index, QTableWidgetItem(value))
@@ -338,3 +438,7 @@ def main() -> None:
     window = MainWindow()
     window.show()
     app.exec()
+
+
+if __name__ == "__main__":
+    main()

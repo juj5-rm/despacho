@@ -9,23 +9,18 @@ class ReportGenerator:
         if not results:
             return "No hay resultados para comparar."
 
-        lines = ["COMPARACIÓN", "-----------"]
+        lines = ["## COMPARACIÓN", "Algoritmo | Promedio TS | Promedio TE", "-" * 48]
         for result in results:
-            lines.append(
-                f"{result.algorithm_name}: TAT promedio = {result.average_turnaround:.2f}, "
-                f"WT promedio = {result.average_waiting:.2f}, "
-                f"RT promedio = {result.average_response:.2f}, "
-                f"Utilización CPU = {result.cpu_utilization:.2f}%"
-            )
+            lines.append(f"{result.algorithm_name} | {result.average_ts:.2f} | {result.average_te:.2f}")
 
-        best_wait = min(results, key=lambda result: result.average_waiting)
-        best_response = min(results, key=lambda result: result.average_response)
+        best_ts = min(results, key=lambda result: result.average_ts)
+        best_te = min(results, key=lambda result: result.average_te)
         lines.extend([
             "",
-            f"{best_wait.algorithm_name} presentó el menor tiempo promedio de espera ({best_wait.average_waiting:.2f}).",
-            f"{best_response.algorithm_name} presentó el menor tiempo promedio de respuesta ({best_response.average_response:.2f}).",
+            f"Menor promedio de TS: {best_ts.algorithm_name}",
+            f"Menor promedio de TE: {best_te.algorithm_name}",
             "",
-            "En este conjunto de procesos, la diferencia entre algoritmos refleja cómo cada estrategia prioriza la llegada, la duración y la respuesta del sistema.",
+            "No se declara un 'mejor' algoritmo en sentido absoluto; los resultados dependen de la métrica evaluada.",
         ])
         return "\n".join(lines)
 
@@ -37,20 +32,27 @@ class ReportGenerator:
         lines = [
             "INFORME DE SIMULACIÓN",
             "====================",
-            f"Número de algoritmos ejecutados: {len(results)}",
+            f"Algoritmos ejecutados: {len(results)}",
             "",
         ]
 
         for result in results:
             lines.extend([
-                result.algorithm_name,
-                "-" * len(result.algorithm_name),
-                f"Tiempo total de simulación: {result.total_time}",
-                f"Promedio TAT: {result.average_turnaround:.2f}",
-                f"Promedio WT: {result.average_waiting:.2f}",
-                f"Promedio RT: {result.average_response:.2f}",
-                f"Utilización CPU: {result.cpu_utilization:.2f}%",
-                f"Cambios de contexto: {result.context_switches}",
+                f"## {result.algorithm_name}",
+                "Proceso | Llegada | Ejecución | Finalización | TS | TE",
+                "-" * 72,
+            ])
+            for process in result.processes:
+                metrics = result.process_metrics.get(process.process_id, {})
+                completion_time = int(metrics.get("completion_time", process.arrival_time))
+                ts = int(metrics.get("ts", completion_time - process.arrival_time))
+                te = int(metrics.get("te", max(0, ts - process.burst_time)))
+                lines.append(
+                    f"{process.process_id} | {process.arrival_time} | {process.burst_time} | {completion_time} | {ts} | {te}"
+                )
+            lines.extend([
+                f"Promedio TS: {result.average_ts:.2f}",
+                f"Promedio TE: {result.average_te:.2f}",
                 "",
             ])
 

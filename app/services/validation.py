@@ -3,6 +3,34 @@ from __future__ import annotations
 from app.models.process import Process
 
 
+def _priority_status(processes: list[Process]) -> tuple[bool, str]:
+    if not processes:
+        return False, "Priority no disponible: no hay procesos para evaluar."
+
+    priorities = [process.priority for process in processes]
+    if not any(priority is not None for priority in priorities):
+        return False, "Priority no disponible: todos los procesos deben tener una prioridad definida."
+    if any(priority is None for priority in priorities):
+        return False, "Priority no disponible: todos los procesos deben tener una prioridad definida."
+    if any(not isinstance(priority, int) or priority <= 0 for priority in priorities):
+        return False, "Priority no disponible: todas las prioridades deben ser enteros mayores que 0."
+    return True, ""
+
+
+def get_algorithm_availability(processes: list[Process], quantum: int | None) -> dict[str, bool]:
+    priority_available, _ = _priority_status(processes)
+    quantum_available = isinstance(quantum, int) and not isinstance(quantum, bool) and quantum > 0
+
+    return {
+        "FCFS": bool(processes),
+        "SJF": bool(processes),
+        "Priority": priority_available,
+        "Round Robin": quantum_available,
+        "SRTF": bool(processes),
+        "Priority Preemptive": priority_available,
+    }
+
+
 def validate_processes(processes: list[Process]) -> None:
     if not processes:
         raise ValueError("Debe existir al menos un proceso.")
@@ -20,23 +48,17 @@ def validate_processes(processes: list[Process]) -> None:
 
 def validate_quantum(quantum: int | None) -> None:
     if quantum is None:
-        raise ValueError("A valid quantum is required for Round Robin.")
+        raise ValueError("Round Robin no disponible: el quantum debe ser mayor que 0.")
     if isinstance(quantum, bool) or not isinstance(quantum, int):
-        raise ValueError("Quantum must be an integer.")
+        raise ValueError("Round Robin no disponible: el quantum debe ser mayor que 0.")
     if quantum <= 0:
-        raise ValueError("Quantum must be a positive integer.")
+        raise ValueError("Round Robin no disponible: el quantum debe ser mayor que 0.")
 
 
 def validate_priority_usage(processes: list[Process]) -> None:
-    priorities = [process.priority for process in processes]
-    has_priority = any(priority is not None for priority in priorities)
-    if has_priority:
-        missing = [process.process_id for process in processes if process.priority is None]
-        if missing:
-            raise ValueError("Priority-based algorithms require all processes to have a valid priority value.")
-        for process in processes:
-            if process.priority is None or not isinstance(process.priority, int) or process.priority <= 0:
-                raise ValueError(f"Priority for {process.process_id} must be a positive integer.")
+    priority_available, message = _priority_status(processes)
+    if not priority_available:
+        raise ValueError(message)
 
 
 def validate_algorithm_inputs(processes: list[Process], quantum: int | None, algorithm_names: list[str]) -> None:
