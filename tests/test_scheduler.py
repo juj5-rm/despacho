@@ -1,4 +1,11 @@
+import os
+
 import pytest
+
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QApplication, QSizePolicy
 
 from app.models.process import Process
 from app.services.validation import (
@@ -15,6 +22,40 @@ from app.algorithms.priority import PriorityAlgorithm
 from app.algorithms.round_robin import RoundRobinAlgorithm
 from app.algorithms.srtf import SRTFAlgorithm
 from app.algorithms.priority_preemptive import PriorityPreemptiveAlgorithm
+from app.ui.main_window import GanttWidget, MainWindow
+
+
+def test_gantt_selector_renders_single_visible_gantt():
+    app = QApplication.instance() or QApplication([])
+    window = MainWindow()
+    window.show()
+    app.processEvents()
+    processes = [
+        Process("P1", 0, 5),
+        Process("P2", 1, 3),
+        Process("P3", 2, 2),
+    ]
+    results = [
+        FCFSAlgorithm().run(processes),
+        SJFAlgorithm().run(processes),
+    ]
+
+    window._render_results(results)
+    window.tabs.setCurrentIndex(2)
+    app.processEvents()
+
+    assert window.gantt_selector.isVisible()
+    assert window.gantt_selector.count() == 2
+    assert window.gantt_scroll.horizontalScrollBarPolicy() == Qt.ScrollBarPolicy.ScrollBarAsNeeded
+    assert window.gantt_scroll.verticalScrollBarPolicy() == Qt.ScrollBarPolicy.ScrollBarAsNeeded
+    assert window.gantt_layout.count() == 1
+
+    item = window.gantt_layout.itemAt(0)
+    assert item is not None
+    widget = item.widget()
+    assert isinstance(widget, GanttWidget)
+    assert widget.canvas.minimumWidth() == 0
+    assert widget.sizePolicy().horizontalPolicy() == QSizePolicy.Policy.Expanding
 
 
 def test_fcfs_order_normal():

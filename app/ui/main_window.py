@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Sequence
 
 if __package__ in (None, ""):
     project_root = Path(__file__).resolve().parents[2]
@@ -12,7 +12,9 @@ if __package__ in (None, ""):
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QApplication,
+    QAbstractItemView,
     QCheckBox,
+    QComboBox,
     QDialog,
     QFormLayout,
     QHBoxLayout,
@@ -34,12 +36,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
-
-try:
-    from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
-except ImportError:  # pragma: no cover
-    from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 
 from app.models.process import Process
 from app.models.results import GanttSegment, SimulationResult
@@ -52,8 +50,8 @@ class ProcessTableWidget(QTableWidget):
         super().__init__()
         self.setColumnCount(4)
         self.setHorizontalHeaderLabels(["ID", "Llegada", "Ráfaga", "Prioridad"])
-        self.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
-        self.setSelectionBehavior(QTableWidget.SelectRows)
+        self.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.setAlternatingRowColors(True)
 
     def set_processes(self, processes: list[Process]) -> None:
@@ -105,19 +103,34 @@ class GanttWidget(QWidget):
     def __init__(self, result: SimulationResult) -> None:
         super().__init__()
         self.result = result
-        self.figure = Figure(figsize=(max(8, result.total_time * 1.2 + 2), 2.5 + max(2, len(result.processes)) * 0.8))
+        self.figure = Figure(figsize=(8, 3.5), dpi=100)
         self.canvas = FigureCanvas(self.figure)
-        self.canvas.setMinimumWidth(max(720, int(self.figure.get_figwidth() * 100)))
-        self.canvas.setMinimumHeight(max(220, int(self.figure.get_figheight() * 110)))
-        self.setMinimumHeight(max(260, int(self.figure.get_figheight() * 120)))
-        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.canvas.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        self.canvas.setMinimumHeight(180)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.setMinimumHeight(220)
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(4, 4, 4, 4)
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setSpacing(4)
         layout.addWidget(self.canvas)
         self.render(result)
 
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._fit_figure_to_available_width()
+        if self.result.processes:
+            self.render(self.result)
+
+    def _fit_figure_to_available_width(self) -> None:
+        width = max(1, self.width())
+        height = max(2.6, 2.0 + max(1, len(self.result.processes)) * 0.7)
+        self.figure.set_size_inches(width / self.figure.dpi, height)
+        self.figure.subplots_adjust(left=0.12, right=0.98, top=0.88, bottom=0.18)
+
     def render(self, result: SimulationResult) -> None:
+        self.result = result
         self.figure.clear()
+        self._fit_figure_to_available_width()
         axes = self.figure.add_subplot(111)
         unique_processes = [process.process_id for process in result.processes]
         y_positions = {process_id: index for index, process_id in enumerate(unique_processes)}
@@ -127,10 +140,13 @@ class GanttWidget(QWidget):
             axes.text(0.5, 0.5, "Sin ejecución", ha="center", va="center")
             axes.set_xticks([])
             axes.set_yticks([])
+            axes.set_xlim(0, 1)
+            axes.set_ylim(0, 1)
             self.canvas.draw()
             return
 
-        axes.set_xlim(0, max(1, result.total_time))
+        total_span = max(1, result.total_time)
+        axes.set_xlim(0, total_span)
         axes.set_ylim(-0.5, len(unique_processes) - 0.5)
         axes.set_yticks(range(len(unique_processes)))
         axes.set_yticklabels(unique_processes)
@@ -167,6 +183,7 @@ class GanttWidget(QWidget):
                 axes.barh(y, segment.duration, left=segment.start, height=0.6, color=color_cycle[y % len(color_cycle)], edgecolor="black", linewidth=1.1)
 
         axes.grid(axis="x", linestyle="--", alpha=0.25)
+        self.figure.tight_layout(pad=1.0)
         self.canvas.draw()
 
     @staticmethod
@@ -205,15 +222,20 @@ class MainWindow(QMainWindow):
         self.results_table = QTableWidget()
         self.results_text = QTextEdit()
         self.results_text.setReadOnly(True)
+        self.gantt_results: dict[str, SimulationResult] = {}
+        self.current_gantt_widget: GanttWidget | None = None
+        self.gantt_selector = QComboBox()
+        self.gantt_selector.setVisible(False)
+        self.gantt_selector.currentIndexChanged.connect(self._on_gantt_selection_changed)
         self.gantt_container = QWidget()
-        self.gantt_container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        self.gantt_container.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         self.gantt_layout = QVBoxLayout(self.gantt_container)
         self.gantt_layout.setContentsMargins(4, 4, 4, 4)
         self.gantt_layout.setSpacing(8)
         self.gantt_scroll = QScrollArea()
         self.gantt_scroll.setWidgetResizable(True)
-        self.gantt_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        self.gantt_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.gantt_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.gantt_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.gantt_scroll.setWidget(self.gantt_container)
         self.gantt_container.setMinimumHeight(350)
         self.tabs = QTabWidget()
@@ -273,11 +295,18 @@ class MainWindow(QMainWindow):
 
         self.results_table.setColumnCount(7)
         self.results_table.setHorizontalHeaderLabels(["Algoritmo", "Proceso", "Llegada", "Ejecución", "Finalización", "TS", "TE"])
-        self.results_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.results_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
 
         self.tabs.addTab(self.results_table, "Resultados")
         self.tabs.addTab(self.results_text, "Informe")
-        self.tabs.addTab(self.gantt_scroll, "Gantt")
+
+        gantt_tab = QWidget()
+        gantt_layout = QVBoxLayout(gantt_tab)
+        gantt_layout.setContentsMargins(8, 8, 8, 8)
+        gantt_layout.setSpacing(8)
+        gantt_layout.addWidget(self.gantt_selector)
+        gantt_layout.addWidget(self.gantt_scroll)
+        self.tabs.addTab(gantt_tab, "Gantt")
 
         split = QSplitter()
         split.addWidget(input_panel)
@@ -334,10 +363,25 @@ class MainWindow(QMainWindow):
         self.results_table.setRowCount(0)
         self.results_table.setColumnCount(7)
         self.results_table.setHorizontalHeaderLabels(["Algoritmo", "Proceso", "Llegada", "Ejecución", "Finalización", "TS", "TE"])
+        self.gantt_results.clear()
+        self.current_gantt_widget = None
+        self.gantt_selector.blockSignals(True)
+        self.gantt_selector.clear()
+        self.gantt_selector.setVisible(False)
+        self.gantt_selector.blockSignals(False)
+        self._clear_gantt_widget()
+
+    def _clear_gantt_widget(self) -> None:
         while self.gantt_layout.count():
             child = self.gantt_layout.takeAt(0)
-            if child.widget() is not None:
-                child.widget().deleteLater()
+            if child is None:
+                continue
+            widget = child.widget()
+            if widget is not None:
+                widget.deleteLater()
+        self.gantt_container.update()
+        self.gantt_container.adjustSize()
+        self.gantt_scroll.updateGeometry()
 
     def _select_all_algorithms(self) -> None:
         for name, checkbox in self.algorithm_checks.items():
@@ -385,20 +429,24 @@ class MainWindow(QMainWindow):
         except ValueError as exc:
             QMessageBox.warning(self, "Validación", str(exc))
 
-    def _render_results(self, results: list[SimulationResult]) -> None:
+    def _render_results(self, results: Sequence[object]) -> None:
+        typed_results = [result for result in results if isinstance(result, SimulationResult)]
+
         self.results_text.clear()
-        self.results_text.setPlainText(ReportGenerator.generate_report(results))
+        self.results_text.setPlainText(ReportGenerator.generate_report(typed_results))
+        self.gantt_results = {result.algorithm_name: result for result in typed_results}
 
-        while self.gantt_layout.count():
-            child = self.gantt_layout.takeAt(0)
-            if child.widget() is not None:
-                child.widget().deleteLater()
+        self.gantt_selector.blockSignals(True)
+        self.gantt_selector.clear()
+        if typed_results:
+            self.gantt_selector.addItems([result.algorithm_name for result in typed_results])
+            self.gantt_selector.setVisible(True)
+            self.gantt_selector.setCurrentIndex(0)
+        else:
+            self.gantt_selector.setVisible(False)
+        self.gantt_selector.blockSignals(False)
 
-        for result in results:
-            widget = GanttWidget(result)
-            widget.setMinimumHeight(max(260, len(result.processes) * 70 + 80))
-            widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-            self.gantt_layout.addWidget(widget)
+        self._show_selected_gantt()
 
         self.gantt_container.adjustSize()
         self.gantt_scroll.updateGeometry()
@@ -406,7 +454,7 @@ class MainWindow(QMainWindow):
         self.results_table.setColumnCount(7)
         self.results_table.setHorizontalHeaderLabels(["Algoritmo", "Proceso", "Llegada", "Ejecución", "Finalización", "TS", "TE"])
 
-        for result in results:
+        for result in typed_results:
             for process in result.processes:
                 metrics = result.process_metrics.get(process.process_id, {})
                 completion_time = int(metrics.get("completion_time", process.arrival_time))
@@ -429,6 +477,34 @@ class MainWindow(QMainWindow):
         self.tabs.setTabText(0, "Resultados")
         self.tabs.setTabText(1, "Informe")
         self.tabs.setTabText(2, "Gantt")
+
+    def _on_gantt_selection_changed(self, index: int) -> None:
+        if index < 0 or self.gantt_selector.count() == 0:
+            return
+        self._show_selected_gantt(self.gantt_selector.itemText(index))
+
+    def _show_selected_gantt(self, algorithm_name: str | None = None) -> None:
+        self._clear_gantt_widget()
+        if not self.gantt_results:
+            return
+
+        if algorithm_name is None:
+            if self.gantt_selector.count() > 0:
+                algorithm_name = self.gantt_selector.currentText()
+            else:
+                algorithm_name = next(iter(self.gantt_results))
+
+        result = self.gantt_results.get(algorithm_name)
+        if result is None:
+            return
+
+        widget = GanttWidget(result)
+        widget.setMinimumHeight(max(220, len(result.processes) * 72 + 80))
+        widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        self.gantt_layout.addWidget(widget)
+        self.current_gantt_widget = widget
+        self.gantt_container.adjustSize()
+        self.gantt_scroll.updateGeometry()
 
 
 def main() -> None:
